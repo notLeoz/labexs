@@ -1,5 +1,4 @@
-use std::{process::ExitCode, env};
-
+use std::{process::ExitCode, env, io::{ Write}, fs::{File, create_dir}};
 use reqwest::{header, Client};
 use scraper::{Html, Selector};
 
@@ -16,11 +15,10 @@ fn create_client_with_default_headers(moodle_session: &str) -> Client {
 
 async fn verify_moodle_session(moodle_session: &str) -> Result<(),()> {
     let client = create_client_with_default_headers(moodle_session);
-    let res = match client.get(LINK).send().await{
+    match client.get(LINK).send().await{
         Ok(_) => Ok(()),
         Err(_) => Err(()),
-    };
-    res
+    }
 }
 
 async fn get_lab_links(lab: &str,moodle_session: &str) -> Result<Vec<String>, ()> {
@@ -61,16 +59,53 @@ async fn get_lab_links(lab: &str,moodle_session: &str) -> Result<Vec<String>, ()
     }
     Ok(links_to_exs)
 } 
-fn get_lab_exs(links: Vec<String>) -> Result<(),()> {
+
+async fn get_lab_exs(links: Vec<String>,moodle_session: &str,lab: &str) -> Result<(),()> {
+    println!("|INFO| Starting to read exercises...");
+    let client = create_client_with_default_headers(moodle_session);
+    //ONLY FIRST LINK FOR TESTING
+    let mut counter = 1;
+    create_dir(format!("../../Laboratorio {lab}")).map_err(|err| {
+        eprintln!("{}",format!("|ERROR| Could not create directory 'Laboratorio {lab}': {err}"));
+    })?;
+    println!("|INFO| Created directory 'Laboratorio {lab}'");
+    for link in links {
+        println!("|INFO| Getting infos of {counter}° exercise");
+        let res = client.get(link).send().await.map_err(|err| {
+            eprintln!("|ERROR| Could not make the get request: {err}");
+        })?.text().await.map_err(|err| {
+            eprintln!("|ERROR| Could not read the response: {err}");
+        })?;
+        let doc = Html::parse_document(&res);
+        let file_name_selector = Selector::parse("h4[id=\"fileid1\"]").unwrap();
+        let file_name = doc.select(&file_name_selector).next().unwrap().inner_html();
+        let ex_text = doc.select(&Selector::parse("pre[id=\"codefileid1\"]").unwrap()).next().unwrap().children().next().unwrap().value().as_text().unwrap();
+        let mut file = File::create(format!("../../Laboratorio {lab}/").to_owned()+&file_name.to_owned()).map_err(|err| {
+            eprintln!("|ERROR| Could not create file named {file_name}: {err}");
+        })?;
+        println!("|INFO| Created file");
+        println!("|INFO| Writing...");
+        for el in ex_text.split("\n") {
+            file.write_all((el.to_owned()+"\n").as_bytes()).unwrap();
+        }
+        println!("|INFO| Done.");
+        counter+=1;
+    }
+    println!("");
+    println!("|INFO| Successfully created all exercises files!");
     Ok(())
 }
 fn usage() {
     eprintln!("Usage: ./labexs [LAB_NUMBER] [MOODLE_SESSION]");
     eprintln!("Example:");
     eprintln!("        ./labexs 4 abcdefghijklm      Downloads all the exercises of lab number 4");
-    eprintln!("IN CASE OF EXPIRED MOODLE SESSION IT CAN CREATE A NEW ONE IF EMAIL AND PASSWORDS ARE IN THE ENV FILE")
+    eprintln!("STILL NOT IMPLEMENTED - #In case of expired moodle session it can create a new one if email and password are in the env file#");
 }
-
+async fn create_new_moodle_session() -> Result<String,()> {
+    println!("|INFO| Retriving email and password from .env");
+    //TODO: get the values from env file and create new moodle_session
+    Ok("Hello".to_owned())
+}
 async fn entry() -> Result<(), ()> {
     let mut args = env::args();
     args.next();
@@ -78,7 +113,7 @@ async fn entry() -> Result<(), ()> {
         eprintln!("|ERROR| Didn't provide the number of lab");
         usage();
     })?;
-    let moodle_session = args.next().ok_or_else(|| {
+    let mut moodle_session = args.next().ok_or_else(|| {
         eprintln!("|ERROR| Didn't provide the MoodleSession");
         usage();
     })?;
@@ -89,13 +124,15 @@ async fn entry() -> Result<(), ()> {
         },
         Err(_) => {
             eprintln!("|INFO| Moodle session is expired... creating new one"); //TODO: create a new moodle session 
-            return Err(());
+            match create_new_moodle_session().await {
+                Ok(data) => moodle_session = data,
+                Err(_) => return Err(()),
+            }
         },
     };
 
-
     let result = match get_lab_links(&lab,&moodle_session).await {
-        Ok(data) => get_lab_exs(data),
+        Ok(data) => get_lab_exs(data,&moodle_session,&lab).await,
         Err(_) => Err(()),
     };
     
