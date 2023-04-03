@@ -1,6 +1,8 @@
-use std::{process::ExitCode, env, io::{ Write}, fs::{File, create_dir}};
+use std::{process::ExitCode, env, fs::{create_dir}, sync::{atomic::AtomicUsize, Arc}};
+use futures::future::JoinAll;
 use reqwest::{header, Client};
 use scraper::{Html, Selector};
+use tokio::io::AsyncWriteExt;
 
 const LINK : &str = "https://elearning.studenti.math.unipd.it/labs/course/view.php?id=25";
 
@@ -58,38 +60,49 @@ async fn get_lab_links(lab: &str,moodle_session: &str) -> Result<Vec<String>, ()
         }
     }
     Ok(links_to_exs)
-} 
+}
+
+
+async fn create_ex_file(client : Client, link: String, counter: Arc<AtomicUsize>,lab: String) -> Result<(),()> {
+    let c = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    println!("|INFO| Getting infos of {c}° exercise");
+    let res = client.get(link).send().await.map_err(|err| {
+        eprintln!("|ERROR| Could not make the get request: {err}");
+    })?.text().await.map_err(|err| {
+        eprintln!("|ERROR| Could not read the response: {err}");
+    })?;
+    let doc = Html::parse_document(&res);
+    let file_name_selector = Selector::parse("h4[id=\"fileid1\"]").unwrap();
+    let file_name = doc.select(&file_name_selector).next().unwrap().inner_html();
+    let ex_text = doc.select(&Selector::parse("pre[id=\"codefileid1\"]").unwrap()).next().unwrap().children().next().unwrap().value().as_text().unwrap();
+    let mut file = tokio::fs::File::create(format!("../../Laboratorio {lab}/").to_owned()+&file_name.to_owned()).await.map_err(|err| {
+        eprintln!("|ERROR| Could not create file named {file_name}: {err}");
+    })?;
+    println!("|INFO| Created file");
+    println!("|INFO| Writing...");
+    for el in ex_text.split("\n") {
+        file.write_all((el.to_owned()+"\n").as_bytes()).await.unwrap();
+    }
+    println!("|INFO| Done.");
+    Ok(())
+}
 
 async fn get_lab_exs(links: Vec<String>,moodle_session: &str,lab: &str) -> Result<(),()> {
     println!("|INFO| Starting to read exercises...");
     let client = create_client_with_default_headers(moodle_session);
     //ONLY FIRST LINK FOR TESTING
-    let mut counter = 1;
     create_dir(format!("../../Laboratorio {lab}")).map_err(|err| {
         eprintln!("{}",format!("|ERROR| Could not create directory 'Laboratorio {lab}': {err}"));
     })?;
     println!("|INFO| Created directory 'Laboratorio {lab}'");
-    for link in links {
-        println!("|INFO| Getting infos of {counter}° exercise");
-        let res = client.get(link).send().await.map_err(|err| {
-            eprintln!("|ERROR| Could not make the get request: {err}");
-        })?.text().await.map_err(|err| {
-            eprintln!("|ERROR| Could not read the response: {err}");
-        })?;
-        let doc = Html::parse_document(&res);
-        let file_name_selector = Selector::parse("h4[id=\"fileid1\"]").unwrap();
-        let file_name = doc.select(&file_name_selector).next().unwrap().inner_html();
-        let ex_text = doc.select(&Selector::parse("pre[id=\"codefileid1\"]").unwrap()).next().unwrap().children().next().unwrap().value().as_text().unwrap();
-        let mut file = File::create(format!("../../Laboratorio {lab}/").to_owned()+&file_name.to_owned()).map_err(|err| {
-            eprintln!("|ERROR| Could not create file named {file_name}: {err}");
-        })?;
-        println!("|INFO| Created file");
-        println!("|INFO| Writing...");
-        for el in ex_text.split("\n") {
-            file.write_all((el.to_owned()+"\n").as_bytes()).unwrap();
+    let counter = Arc::new(AtomicUsize::new(1));
+    
+    let results = links.into_iter().map(|link| create_ex_file(client.clone(), link.clone(), counter.clone(), lab.to_owned())).collect::<JoinAll<_>>().await;
+    for result in results {
+        match result {
+            Ok(_) => continue,
+            Err(_) => eprintln!("|ERROR| An error occured while making get requests"),
         }
-        println!("|INFO| Done.");
-        counter+=1;
     }
     println!("");
     println!("|INFO| Successfully created all exercises files!");
@@ -130,14 +143,11 @@ async fn entry() -> Result<(), ()> {
             }
         },
     };
-
-    let result = match get_lab_links(&lab,&moodle_session).await {
+    match get_lab_links(&lab,&moodle_session).await {
         Ok(data) => get_lab_exs(data,&moodle_session,&lab).await,
         Err(_) => Err(()),
-    };
-    
-    
-    result
+    }
+
 }
 #[tokio::main]
 async fn main() -> ExitCode{
