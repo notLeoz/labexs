@@ -1,1 +1,1 @@
-#labexs - Lab exercies downloader in rust
+#labexs - Lab exercises downloader in rust
